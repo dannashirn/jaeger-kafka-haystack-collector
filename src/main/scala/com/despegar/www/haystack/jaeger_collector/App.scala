@@ -20,6 +20,8 @@ import org.joda.time.DateTime
 import org.joda.time.format.DateTimeFormat
 import org.json4s._
 import org.json4s.native.JsonMethods._
+import java.text.SimpleDateFormat
+import java.util.TimeZone
 
 
 object App {
@@ -31,7 +33,7 @@ object App {
     val props: Properties = {
       val p = new Properties()
       p.put(StreamsConfig.APPLICATION_ID_CONFIG, "collector-test")
-      p.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "")
+      p.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
       p
     }
 
@@ -39,10 +41,11 @@ object App {
 
     val builder = new StreamsBuilder
     val jaegerTraces: KStream[String,String] = builder.stream[String, String]("jaeger-spans")
-    val haystackTraces: KStream[String, Span] = jaegerTraces
-      .flatMapValues( (_, b) => List(parse(b).extract[Span]) )
+    val haystackTraces: KStream[String, Span] = jaegerTraces.flatMap((key, b) => {
+        val span = parse(b).extract[Span]
+        List((span.traceId, span))
+      })
     haystackTraces.to("proto-spans")
-
     val streams: KafkaStreams = new KafkaStreams(builder.build(), props)
     streams.start()
 
@@ -68,7 +71,7 @@ object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
     val logs = (jsonObj \ "logs").extract[Seq[Log]]
     val tags = (jsonObj \ "tags").extract[Seq[Tag]]
 
-    val span = Span(traceId, spanId, parentSpanId, serviceName, operationName.getOrElse("operation-not-found"), startTime, duration.getOrElse(0L), logs, tags)
+    val span = Span(traceId, spanId, parentSpanId, serviceName, operationName.getOrElse("operation-not-found"), startTime, duration.getOrElse(1L), logs, tags)
     println(span)
     span
 }, {
@@ -84,8 +87,11 @@ object StringToLong extends CustomSerializer[Long](format => (
     val datePattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
     DateTime.parse(x, DateTimeFormat.forPattern(datePattern)).getMillis * 1000
   } catch {
-    case _: Exception =>
+    case _: Exception => {
       val durationPattern = "s.SSS's'"
-      DateTime.parse(x, DateTimeFormat.forPattern(durationPattern)).getMillis * 1000
+      val dateFormat = new SimpleDateFormat(durationPattern)
+      dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"))
+      dateFormat.parse(x).toInstant.toEpochMilli * 1000
+    }
   }},
   { case x: Long => JInt(x) }))
