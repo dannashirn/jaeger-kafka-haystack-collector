@@ -1,12 +1,8 @@
 package com.despegar.www.haystack.jaeger_collector
 
-import java.text.SimpleDateFormat
-import java.time.format.DateTimeFormatter
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 
-import org.json4s.CustomSerializer
-import org.json4s.JsonAST._
 import org.json4s.JsonDSL._
 import com.expedia.open.tracing.span.{Log, Span, Tag}
 import org.apache.kafka.streams.scala.ImplicitConversions._
@@ -15,7 +11,6 @@ import org.apache.kafka.streams.scala.kstream._
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig}
 import org.json4s.{CustomSerializer, DefaultFormats}
 import org.json4s.JsonAST.{JInt, JString}
-import scalapb.json4s.JsonFormat
 import org.joda.time.DateTime
 import org.joda.time.format.DateTimeFormat
 import org.json4s._
@@ -23,6 +18,12 @@ import org.json4s.native.JsonMethods._
 import java.text.SimpleDateFormat
 import java.util.TimeZone
 
+
+object Configuration {
+  val bootstrapServers: String = sys.env("KAFKA_BOOTSTRAP_SERVER")
+  val kafkaConsumeTopic: String = sys.env("KAFKA_CONSUME_TOPIC")
+  val kafkaProduceTopic: String = sys.env("KAFKA_PRODUCE_TOPIC")
+}
 
 object App {
   def main(args: Array[String]): Unit = {
@@ -33,19 +34,19 @@ object App {
     val props: Properties = {
       val p = new Properties()
       p.put(StreamsConfig.APPLICATION_ID_CONFIG, "collector-test")
-      p.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
+      p.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, Configuration.bootstrapServers)
       p
     }
 
     implicit val formats: Formats = DefaultFormats + SpanCustomDeserializer
 
     val builder = new StreamsBuilder
-    val jaegerTraces: KStream[String,String] = builder.stream[String, String]("jaeger-spans")
+    val jaegerTraces: KStream[String,String] = builder.stream[String, String](Configuration.kafkaConsumeTopic)
     val haystackTraces: KStream[String, Span] = jaegerTraces.flatMap((key, b) => {
         val span = parse(b).extract[Span]
         List((span.traceId, span))
       })
-    haystackTraces.to("proto-spans")
+    haystackTraces.to(Configuration.kafkaProduceTopic)
     val streams: KafkaStreams = new KafkaStreams(builder.build(), props)
     streams.start()
 
@@ -63,7 +64,6 @@ object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
     val traceId = (jsonObj \ "traceId").extract[String]
     val spanId = (jsonObj \ "spanId").extract[String]
     val parentSpanId = ""
-    println(s"JObject: $jsonObj")
     val serviceName = (jsonObj \ "process" \ "serviceName").extract[String]
     val operationName = (jsonObj \ "operationName").extract[Option[String]]
     val startTime = (jsonObj \ "startTime").extract[Long]
@@ -72,7 +72,6 @@ object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
     val tags = (jsonObj \ "tags").extract[Seq[Tag]]
 
     val span = Span(traceId, spanId, parentSpanId, serviceName, operationName.getOrElse("operation-not-found"), startTime, duration.getOrElse(1L), logs, tags)
-    println(span)
     span
 }, {
   case span: Span =>
@@ -87,11 +86,10 @@ object StringToLong extends CustomSerializer[Long](format => (
     val datePattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
     DateTime.parse(x, DateTimeFormat.forPattern(datePattern)).getMillis * 1000
   } catch {
-    case _: Exception => {
+    case _: Exception =>
       val durationPattern = "s.SSS's'"
       val dateFormat = new SimpleDateFormat(durationPattern)
       dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"))
       dateFormat.parse(x).toInstant.toEpochMilli * 1000
-    }
   }},
   { case x: Long => JInt(x) }))
