@@ -10,9 +10,11 @@ import org.json4s._
 import java.text.SimpleDateFormat
 import java.util.TimeZone
 
+import com.expedia.open.tracing.span.Tag.Myvalue
+import com.expedia.open.tracing.span.Tag.Myvalue.VStr
 import com.google.protobuf.ByteString
 
-object TagCustomDeserializer extends CustomSerializer[Tag](format => ( {
+object TagCustomDeserializer extends CustomSerializer[Tag](_ => ( {
   case jsonObj: JObject =>
     import Tag.TagType._
     import Tag.Myvalue._
@@ -41,6 +43,10 @@ object TagCustomDeserializer extends CustomSerializer[Tag](format => ( {
         val value = tagTypeOp.map{
           case BOOL => VBool(false)
           case STRING => VStr("")
+          case BINARY => VBytes(ByteString.EMPTY)
+          case DOUBLE => VDouble(0)
+          case LONG => VLong(0L)
+          case Unrecognized(_) => Myvalue.Empty
         }.getOrElse(VStr((jsonObj \ "vStr").extract[String]))
         Tag(key, myvalue = value)
       case 3 =>
@@ -52,6 +58,7 @@ object TagCustomDeserializer extends CustomSerializer[Tag](format => ( {
           case DOUBLE => VDouble((jsonObj \ "vDouble").extract[Double])
           case LONG => VLong((jsonObj \ "vLong").extract[Long])
           case BINARY => VBytes((jsonObj \ "vBytes").extract[ByteString])
+          case Unrecognized(_) => Myvalue.Empty
         }
         Tag(key, `type`, value)
     }
@@ -60,14 +67,14 @@ object TagCustomDeserializer extends CustomSerializer[Tag](format => ( {
     JObject()
 }))
 
-object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
+object SpanCustomDeserializer extends CustomSerializer[Span](_ => ( {
 
   case jsonObj: JObject =>
     implicit val formats: Formats = DefaultFormats + StringToLong + TagCustomDeserializer
 
     val traceId = (jsonObj \ "traceId").extract[String]
     val spanId = (jsonObj \ "spanId").extract[String]
-    val parentSpanId = ""
+    val parentId = (jsonObj \ "parentSpanId").extract[Option[String]]
     val serviceName = (jsonObj \ "process" \ "serviceName").extract[String]
     val operationName = (jsonObj \ "operationName").extract[Option[String]]
     val startTime = (jsonObj \ "startTime").extract[Long]
@@ -75,7 +82,17 @@ object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
     val logs = (jsonObj \ "logs").extract[Seq[Log]]
     val tags = (jsonObj \ "tags").extract[Seq[Tag]]
 
-    Span(traceId, spanId, parentSpanId, serviceName, operationName.getOrElse("operation-not-found"), startTime, duration.getOrElse(1L), logs, tags)
+    val parentSpanId = parentId.getOrElse(
+      tags.find(_.key == "parentID").map(t =>
+        t.myvalue match {
+          case VStr(psid) => psid
+          case _ => ""
+        }
+      ).getOrElse(""))
+
+    Span(traceId, spanId, parentSpanId, serviceName, operationName.getOrElse("operation-not-found"),
+        startTime, duration.getOrElse(1000L), logs, tags.filterNot(_.key == "parentID"))
+
 }, {
   case span: Span =>
     ("traceId" -> span.traceId) ~
@@ -84,7 +101,7 @@ object SpanCustomDeserializer extends CustomSerializer[Span](format => ( {
 
 }))
 
-object StringToLong extends CustomSerializer[Long](format => (
+object StringToLong extends CustomSerializer[Long](_ => (
   { case JString(x) =>  try {
     val datePattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
     DateTime.parse(x, DateTimeFormat.forPattern(datePattern)).getMillis * 1000
